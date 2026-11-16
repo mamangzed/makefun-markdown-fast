@@ -2394,11 +2394,12 @@ function inlineHtml(text, defs) {
 
   // marked's emStrong runs on a masked copy of the paragraph in
   // which link/code-span contents are replaced by 'a's. Its masking
-  // mis-pairs a stray backtick inside a link label (a shorter run
-  // that closes a longer run in the label's any-length sense, with
-  // no same-length closer before ']') with the next same-length
-  // backtick after the label, creating a phantom code span that
-  // swallows any emphasis delimiters inside it. Replicate that
+  // mis-pairs a stray backtick inside a link label (a run with no
+  // same-length closer before ']', e.g. a shorter run closing a
+  // longer run, or a lone run with no closer at all) with the next
+  // same-length backtick after the label, creating a phantom code
+  // span that swallows any emphasis delimiters inside it (the
+  // span's content may cross other backticks). Replicate that
   // masking for emphasis visibility only: deactivate delimiters
   // inside such a phantom span (real tokenization is untouched).
   // A "same-length closer" is len backticks not followed by another
@@ -2430,24 +2431,54 @@ function inlineHtml(text, defs) {
         j++;
       }
       if (close < 0) { i++; continue; }
-      let k = i + 1, prevLen = 0;
+      // collect the backtick runs in this label, then simulate
+      // code-span pairing: a run closes the most recent unconsumed
+      // opener whose length it covers (len >= opener len); a run
+      // shorter than the top opener sits inside that opener's
+      // content -- it is a stray only if the opener is never closed
+      // in the label (a run inside a closed code span is not)
+      const runs = [];
+      let k = i + 1;
       while (k < close) {
         if (text[k] === '`') {
           let m = k;
           while (m < close && text[m] === '`') m++;
-          const len = m - k;
-          if (prevLen > len && findBtCloser(m, len, close) < 0) {
-            const end = findBtCloser(close + 1, len, N);
-            if (end >= 0) {
-              for (const d of delims) {
-                if (d.pos >= k && d.pos < end) { d.active = false; d.canOpen = false; d.canClose = false; }
-              }
-            }
-            break;
-          }
-          prevLen = len;
+          runs.push({ start: k, len: m - k });
           k = m;
         } else k++;
+      }
+      const pending = [];
+      for (let r of runs) {
+        let cur = { start: r.start, len: r.len };
+        while (cur.len > 0) {
+          if (pending.length === 0) { pending.push({ start: cur.start, len: cur.len, cands: [] }); break; }
+          const top = pending[pending.length - 1];
+          if (top.len <= cur.len) {
+            // cur closes top (using cur's last top.len backticks);
+            // the runs inside top were part of a valid code span,
+            // so they are not strays -- discard them with top
+            pending.pop();
+            cur = { start: cur.start, len: cur.len - top.len };
+          } else {
+            // cur is shorter than top: it sits inside top's content
+            top.cands.push({ start: cur.start, len: cur.len });
+            break;
+          }
+        }
+      }
+      // every unconsumed opener, and every run inside it, is a
+      // stray: mask from each to the next same-length run after
+      // the label
+      for (const op of pending) {
+        const strays = [{ start: op.start, len: op.len }, ...op.cands];
+        for (const st of strays) {
+          const end = findBtCloser(close + 1, st.len, N);
+          if (end >= 0) {
+            for (const d of delims) {
+              if (d.pos >= st.start && d.pos < end) { d.active = false; d.canOpen = false; d.canClose = false; }
+            }
+          }
+        }
       }
       i = close + 1;
     }
