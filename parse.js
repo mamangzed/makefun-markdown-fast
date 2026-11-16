@@ -2185,7 +2185,7 @@ function inlineHtml(text, defs) {
         canOpen = left;
         canClose = right;
       }
-      const d = pushNode({ k: 'delim', ch, n: runLen, origN: runLen, canOpen, canClose, active: true, openTags: [], closeTags: [] });
+      const d = pushNode({ k: 'delim', ch, n: runLen, origN: runLen, canOpen, canClose, active: true, openTags: [], closeTags: [], pos: i });
       delims.push(d);
       i = j;
       continue;
@@ -2385,6 +2385,68 @@ function inlineHtml(text, defs) {
     i = j;
   }
 
+  // marked's emStrong runs on a masked copy of the paragraph in
+  // which link/code-span contents are replaced by 'a's. Its masking
+  // mis-pairs a stray backtick inside a link label (a shorter run
+  // that closes a longer run in the label's any-length sense, with
+  // no same-length closer before ']') with the next same-length
+  // backtick after the label, creating a phantom code span that
+  // swallows any emphasis delimiters inside it. Replicate that
+  // masking for emphasis visibility only: deactivate delimiters
+  // inside such a phantom span (real tokenization is untouched).
+  // A "same-length closer" is len backticks not followed by another
+  // backtick -- so the last len backticks of a longer run count.
+  function findBtCloser(from, len, end) {
+    let p = from;
+    while (p < end) {
+      if (text[p] === '`') {
+        let r = p;
+        while (r < end && text[r] === '`') r++;
+        if (r - p >= len && (r >= end || text[r] !== '`')) {
+          // the last len backticks of this run are followed by a
+          // non-backtick (or the end), so they close a len-run
+          return r - len;
+        }
+        p = r;
+      } else p++;
+    }
+    return -1;
+  }
+  function applyPhantomMask() {
+    const N = text.length;
+    let i = 0;
+    while (i < N) {
+      if (text[i] !== '[') { i++; continue; }
+      let j = i + 1, close = -1;
+      while (j < N) {
+        if (text[j] === ']' && isValidLabel(text, i + 1, j)) { close = j; break; }
+        j++;
+      }
+      if (close < 0) { i++; continue; }
+      let k = i + 1, prevLen = 0;
+      while (k < close) {
+        if (text[k] === '`') {
+          let m = k;
+          while (m < close && text[m] === '`') m++;
+          const len = m - k;
+          if (prevLen > len && findBtCloser(m, len, close) < 0) {
+            const end = findBtCloser(close + 1, len, N);
+            if (end >= 0) {
+              for (const d of delims) {
+                if (d.pos >= k && d.pos < end) { d.active = false; d.canOpen = false; d.canClose = false; }
+              }
+            }
+            break;
+          }
+          prevLen = len;
+          k = m;
+        } else k++;
+      }
+      i = close + 1;
+    }
+  }
+
+  applyPhantomMask();
   processEmphasis(-1);
 
   // plain-text rendering of a node list (image alt text)
