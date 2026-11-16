@@ -2054,6 +2054,12 @@ function inlineHtml(text, defs) {
       for (let k = oi + 1; k < ci; k++) {
         const d = delims[k];
         if (d.ch !== opener.ch) continue;
+        // a delimiter deactivated (but not consumed) inside an inner
+        // emphasis is literal text there, so it no longer counts toward
+        // the outer match (cm-470: the '*' before 'baz' is inside the
+        // strong 'bar *baz bim'). A delimiter consumed into an inner
+        // emphasis (n === 0) still counts via origN (cm-408).
+        if (!d.active && d.n > 0) continue;
         if (d.canOpen && !d.canClose) m += d.origN;
         else if (d.canClose) {
           if (d.canOpen && opener.origN % 3 !== 0 &&
