@@ -2117,6 +2117,21 @@ function inlineHtml(text, defs) {
       closer.closeTags.push(tag);
       opener.n -= use;
       closer.n -= use;
+      // a leftover delimiter on the closer renders after the close
+      // tag by default ('**foo***' -> '<strong>foo</strong>*'), but
+      // for a STRONG (use === 2), when the innermost emphasis just
+      // inside was closed by a both-ways delimiter ('**a *b*c***',
+      // the '*' after 'b' can both open and close), marked puts the
+      // leftover INSIDE the tag ('<strong>a <em>b</em>c*</strong>'):
+      // flag it so the renderer emits the leftover before the close
+      // tag. (For em, use === 1, the leftover stays outside.)
+      if (closer.n > 0 && use === 2) {
+        for (let k = ci - 1; k > found; k--) {
+          const d = delims[k];
+          if (d.closeTags.length > 0 && d.n === 0 && d.canOpen && d.canClose) { closer.leftoverInside = true; break; }
+          if (d.n > 0 && d.active) break;
+        }
+      }
       if (opener.n === 0) opener.active = false;
       if (closer.n === 0) { closer.active = false; ci++; }
       // delimiters strictly inside this emphasis cannot match a closer
@@ -2506,8 +2521,12 @@ function inlineHtml(text, defs) {
     for (const nd of list) {
       if (nd.k === 'text') out += esc(nd.s, false);
       else if (nd.k === 'delim') {
+        // leftover delimiters normally render after the close tags,
+        // but a leftover flagged 'leftoverInside' renders before
+        // them (inside the emphasis tag)
+        if (nd.leftoverInside && nd.n > 0) out += nd.ch.repeat(nd.n);
         for (const t of nd.closeTags) out += '</' + t + '>';
-        if (nd.n > 0) out += nd.ch.repeat(nd.n);
+        if (!nd.leftoverInside && nd.n > 0) out += nd.ch.repeat(nd.n);
         for (let k = nd.openTags.length - 1; k >= 0; k--) out += '<' + nd.openTags[k] + '>';
       }
       else if (nd.k === 'open') out += nd.img ? '![' : '[';
