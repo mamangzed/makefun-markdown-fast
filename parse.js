@@ -298,7 +298,15 @@ function matchBQ(s, col, nested) {
   let col3 = col + ind + 1;
   // optional single space after '>' (one column; a tab gives a space and
   // the rest of the tab stays as spaces)
-  if (s3.charCodeAt(0) === 32) { s3 = s3.slice(1); col3++; }
+  if (s3.charCodeAt(0) === 32) {
+    s3 = s3.slice(1); col3++;
+    // a tab right after that space expands fully to the next tab stop
+    // (the space already served as the '>' separator)
+    if (s3.charCodeAt(0) === 9) {
+      if (nested) s3 = '  ' + s3.slice(1);
+      else { const w = 4 - (col3 % 4); s3 = ' '.repeat(w) + s3.slice(1); col3 += w; }
+    }
+  }
   else if (s3.charCodeAt(0) === 9) {
     if (nested) {
       // inside a nested blockquote a tab after '>' expands to exactly
