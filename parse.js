@@ -2098,6 +2098,9 @@ function inlineHtml(text, defs) {
       if (!closer.active || !closer.canClose) { ci++; continue; }
       let oi = ci - 1;
       let found = -1;
+      // the nearest em match, held back while we look for a farther
+      // strong match that the closer run cannot also satisfy
+      let nearestEm = -1;
       while (oi >= 0 && delims[oi].seq > bottomSeq) {
         const opener = delims[oi];
         if (opener.active && opener.canOpen && opener.ch === closer.ch) {
@@ -2110,11 +2113,24 @@ function inlineHtml(text, defs) {
             // at least one delimiter between opener and closer (an
             // immediately following closer is the inner emphasis and
             // must be allowed, e.g. one '_' of '__')
-            if (ci - oi <= 1 || openerMatches(oi, ci)) { found = oi; break; }
+            if (ci - oi <= 1 || openerMatches(oi, ci)) {
+              // marked scans opener-first: a farther strong opener
+              // wins the closer when the run cannot satisfy BOTH the
+              // nearest em (1 star) and that strong (2 stars) -- i.e.
+              // the closer has exactly 2 stars left. With 3+ stars
+              // both fit (em first, strong from the leftover), so the
+              // nearest match stands.
+              const useHere = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
+              if (useHere === 2) { found = oi; break; }
+              if (nearestEm < 0) nearestEm = oi;
+              if (closer.n >= 3) { found = oi; break; }
+              // closer.n === 2: keep scanning farther for a strong
+            }
           }
         }
         oi--;
       }
+      if (found < 0) found = nearestEm;
       if (found < 0) { ci++; continue; }
       const opener = delims[found];
       const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
