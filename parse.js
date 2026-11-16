@@ -1881,6 +1881,37 @@ function isValidLabel(s, start, end) {
   return depth === 0;
 }
 
+// Is there a backtick run in s[start..end) with no later backtick run
+// to close it (and not a trailing run reaching end)? Mirrors the
+// backtick half of isValidLabel; bracket depth is ignored here.
+function labelBacktickInvalid(s, start, end) {
+  let i = start;
+  while (i < end) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < end) { i += 2; continue; }
+    if (ch === '`') {
+      let j = i;
+      while (j < end && s[j] === '`') j++;
+      let k = j;
+      let closed = false;
+      while (k < end) {
+        if (s[k] === '`') { closed = true; break; }
+        k++;
+      }
+      if (!closed) {
+        if (j === end) return false;
+        return true;
+      }
+      let m = k;
+      while (m < end && s[m] === '`') m++;
+      i = m;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------- inline main
 
 // marked keeps a document-wide inLink flag, set by an inline <a ...>
@@ -2092,7 +2123,17 @@ function inlineHtml(text, defs) {
       for (let oi = 0; oi < openers.length; oi++) {
         const o = openers[oi];
         const ls = o.startPos + (o.img ? 2 : 1);
-        if (!isValidLabel(text, ls, i)) continue;
+        if (!isValidLabel(text, ls, i)) {
+          // a label invalidated by an unclosed backtick run, followed
+          // by '(', suppresses emphasis inside it: marked's label scan
+          // consumes the label and its delimiters never form emphasis.
+          // Only the nearest opener counts (an outer opener's label
+          // spans nested links whose emphasis must be left alone).
+          if (oi === openers.length - 1 && text[i + 1] === '(' && labelBacktickInvalid(text, ls, i)) {
+            for (const d of delims) if (d.seq > o.seq && d.active) { d.active = false; d.canOpen = false; d.canClose = false; }
+          }
+          continue;
+        }
         let lk = null;
         let le = i + 1;
         let skipShortcut = false;
