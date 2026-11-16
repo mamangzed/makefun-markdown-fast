@@ -301,10 +301,12 @@ function matchBQ(s, col, nested) {
   if (s3.charCodeAt(0) === 32) {
     s3 = s3.slice(1); col3++;
     // a tab right after that space expands fully to the next tab stop
-    // (the space already served as the '>' separator)
+    // (the space already served as the '>' separator); the tab stop is
+    // counted from the layer-local column (col3 - col: marked re-lexes
+    // each container layer from column 0), not the absolute column
     if (s3.charCodeAt(0) === 9) {
       if (nested) s3 = '  ' + s3.slice(1);
-      else { const w = 4 - (col3 % 4); s3 = ' '.repeat(w) + s3.slice(1); col3 += w; }
+      else { const w = 4 - ((col3 - col) % 4); s3 = ' '.repeat(w) + s3.slice(1); col3 += w; }
     }
   }
   else if (s3.charCodeAt(0) === 9) {
@@ -314,7 +316,7 @@ function matchBQ(s, col, nested) {
       // two columns to the tab stop, regardless of depth)
       s3 = '  ' + s3.slice(1);
     } else {
-      const w = 4 - (col3 % 4);
+      const w = 4 - ((col3 - col) % 4);
       s3 = ' '.repeat(w - 1) + s3.slice(1);
       col3++;
     }
@@ -589,9 +591,15 @@ function parseBlocks(lines, srcEndsNL) {
       return { s, col };
     }
     let bqSeen = false;
+    let bqOrigin = null;
     for (let k = 1; k < stack.length; k++) {
       const nd = stack[k];
       if (nd.t === 'bq') {
+        // record the column where the innermost blockquote layer's
+        // line starts: marked re-lexes each container layer from
+        // column 0, so a tab inside it expands from the layer-local
+        // column (r.col - bqOrigin), not the absolute document column
+        bqOrigin = col;
         const r = matchBQ(s, col, bqSeen);
         if (!r) return null;
         s = r.s; col = r.col;
@@ -606,7 +614,7 @@ function parseBlocks(lines, srcEndsNL) {
         return null;
       }
     }
-    return { s, col };
+    return { s, col, bqOrigin };
   }
 
   // Try to parse link reference definitions starting at line i with
@@ -803,12 +811,11 @@ function parseBlocks(lines, srcEndsNL) {
       // Inside 2+ nested blockquotes the tab stop is column 2 (marked
       // treats the nested '>' markers as contributing two columns).
       const stripped = fenceIndent > 0 ? stripIndentFrom(c, fenceIndent, r.col) : c;
-      let tabCol = r.col;
-      if (r.col > 0) {
-        let bqDepth = 0;
-        for (let q = 1; q < stack.length; q++) if (stack[q].t === 'bq') bqDepth++;
-        if (bqDepth >= 2) tabCol = 2;
-      }
+      // a tab in fenced content expands from the layer-local column:
+      // the column within the innermost blockquote layer's re-lexed
+      // text (r.col minus the column that layer's line started at),
+      // not the absolute document column; no blockquote -> as before
+      let tabCol = r.bqOrigin != null ? r.col - r.bqOrigin : r.col;
       content.push(r.col > 0 ? expandLeadingTabs(stripped, tabCol + fenceIndent) : stripped);
       k++;
     }
