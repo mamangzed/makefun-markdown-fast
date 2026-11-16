@@ -574,7 +574,7 @@ function parseBlocks(lines, srcEndsNL) {
         if (nd.t === 'bq') return null;
         if (nd.t === 'item') {
           const avail = indentOfFrom(s, col);
-          const strip = Math.min(avail, nd.indent - col);
+          const strip = Math.min(avail, nd.indent);
           if (strip > 0) { s = stripIndentFrom(s, strip, col); col += strip; }
         } else if (nd.t === 'para') return null;
       }
@@ -591,9 +591,9 @@ function parseBlocks(lines, srcEndsNL) {
       } else if (nd.t === 'item') {
         if (isBlank(s)) return null;
         const ind = indentOfFrom(s, col);
-        if (col + ind < nd.indent) return null;
-        s = stripIndentFrom(s, nd.indent - col, col);
-        col = nd.indent;
+        if (ind < nd.indent) return null;
+        s = stripIndentFrom(s, nd.indent, col);
+        col = col + nd.indent;
       } else if (nd.t === 'para') {
         return null;
       }
@@ -768,6 +768,11 @@ function parseBlocks(lines, srcEndsNL) {
       // ends the blockquote and the code block inside it
       let r = peekContent(k);
       if (r === null) {
+        // a line that does not match the enclosing container is code
+        // content only once the block already has content (a 0-indent
+        // first line after the fence is outside the list item, so the
+        // block is empty); a line missing a '>' marker ends the block
+        if (content.length === 0) break;
         r = matchBQsOnly(lines[k], 0);
         if (r === null) break;
       }
@@ -1102,7 +1107,10 @@ function parseBlocks(lines, srcEndsNL) {
   }
 
   function startItem(s, col, lm, ind) {
-    // content indent: marker indent + marker width + following spaces
+    // content indent: marker indent + marker width + following spaces,
+    // relative to the start of this line's container content (not an
+    // absolute column: a blockquote marker strips a variable number of
+    // columns, so an absolute indent miscompares across lines)
     const markerCol = col + ind;
     let contentIndent;
     const rest = lm.rest;
@@ -1117,24 +1125,25 @@ function parseBlocks(lines, srcEndsNL) {
     }
     if (rest.slice(j).trim() === '') {
       // empty item: content indent is marker + width + 1
-      contentIndent = markerCol + lm.width + 1;
+      contentIndent = ind + lm.width + 1;
     } else if (spaces >= 5) {
-      contentIndent = markerCol + lm.width + 1;
+      contentIndent = ind + lm.width + 1;
     } else {
-      contentIndent = markerCol + lm.width + spaces;
+      contentIndent = ind + lm.width + spaces;
     }
     const item = node('item');
     item.indent = contentIndent;
     addBlock(item);
     stack.push(item);
     // the item's content: the rest of this line after the marker+spaces
-    const content = stripIndentFrom(rest, contentIndent - (markerCol + lm.width), markerCol + lm.width);
+    // (strip `spaces` columns = contentIndent - ind - lm.width)
+    const content = stripIndentFrom(rest, contentIndent - ind - lm.width, markerCol + lm.width);
     if (content.trim() !== '') {
       // task list item: "[ ] " / "[x] " / "[X] " at the start, with
       // non-space content after it; the marker is stripped and the
       // checkbox is rendered at the start of the first paragraph
       let firstContent = content;
-      let firstCol = col + (contentIndent - col);
+      let firstCol = col + contentIndent;
       const tm = content.match(/^\[([ xX])\][ \t]+/);
       if (tm && content.slice(tm[0].length).trim() !== '') {
         item.task = (tm[1] === 'x' || tm[1] === 'X') ? 'checked' : 'unchecked';
@@ -1250,7 +1259,7 @@ function parseBlocks(lines, srcEndsNL) {
       } else if (nd.t === 'item') {
         if (!isBlank(s)) {
           const ind = indentOfFrom(s, col);
-          if (col + ind < nd.indent) {
+          if (ind < nd.indent) {
             // does the line start a new item of the enclosing list?
             const lm = listMarker(stripUpTo3(s, col));
             const lst = stack[k - 1];
@@ -1260,14 +1269,25 @@ function parseBlocks(lines, srcEndsNL) {
             matched = same ? k : k - 1;
             break;
           }
-          if (nd.indent > col) {
-            s = stripIndentFrom(s, nd.indent - col, col);
-            col = nd.indent;
-          }
-          // else: already past the item's indent, nothing to strip
+          s = stripIndentFrom(s, nd.indent, col);
+          col = col + nd.indent;
         }
       }
       // list and para nodes match trivially
+    }
+    if (isBlank(s) && s.length > 0 && tip().t === 'para' && stack.some(nd => nd.t === 'bq')) {
+      // a whitespace-only line inside a blockquote whose content is
+      // non-empty (e.g. '>  ' leaves a single space) is a paragraph
+      // line, not a blank line, when it is the last line of input
+      // (all following lines blank); mid-document it closes the
+      // paragraph as usual
+      let restBlank = true;
+      for (let j = i + 1; j < n; j++) if (!isBlank(lines[j])) { restBlank = false; break; }
+      if (restBlank) {
+        addParaLine(tip(), s);
+        i++;
+        continue;
+      }
     }
     if (isBlank(s)) {
       // a blank line closes the paragraph and every container the line
@@ -1844,6 +1864,13 @@ function isValidLabel(s, start, end) {
 
 // ---------------------------------------------------------------- inline main
 
+// marked keeps a document-wide inLink flag, set by an inline <a ...>
+// tag and cleared by an inline </a>, that suppresses GFM extended
+// autolinks (www. / scheme / email) for the rest of the document.
+// It is never reset between blocks and is not touched by HTML blocks,
+// code spans or fenced code. Reset once per parse() call.
+let inLink = false;
+
 function inlineHtml(text, defs) {
   const nodes = [];
   const delims = [];
@@ -1872,6 +1899,27 @@ function inlineHtml(text, defs) {
   // Resolve emphasis among delimiters with seq > bottomSeq, recording
   // open/close tags on the delimiter nodes.
   function processEmphasis(bottomSeq) {
+    // marked scans forward from an opener, counting delimiter lengths:
+    // opener-like runs add, closer-like runs subtract, both-ways runs
+    // subtract unless odd-match-blocked against the opener (opener
+    // length not a multiple of 3, sum a multiple of 3). The opener
+    // matches the closer only when the count reaches <= 0 there.
+    function openerMatches(oi, ci) {
+      const opener = delims[oi];
+      let m = opener.origN;
+      for (let k = oi + 1; k < ci; k++) {
+        const d = delims[k];
+        if (d.ch !== opener.ch) continue;
+        if (d.canOpen && !d.canClose) m += d.origN;
+        else if (d.canClose) {
+          if (d.canOpen && opener.origN % 3 !== 0 &&
+              (opener.origN + d.origN) % 3 === 0) continue;
+          m -= d.origN;
+        }
+      }
+      m -= delims[ci].origN;
+      return m <= 0;
+    }
     let ci = 0;
     while (ci < delims.length && delims[ci].seq <= bottomSeq) ci++;
     while (ci < delims.length) {
@@ -1886,7 +1934,13 @@ function inlineHtml(text, defs) {
           // delimiters can both open and close emphasis
           const bothWays = (opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose);
           const odd = bothWays && (opener.n + closer.n) % 3 === 0 && (opener.n % 3 !== 0 && closer.n % 3 !== 0);
-          if (!odd) { found = oi; break; }
+          if (!odd) {
+            // the forward-scan count only blocks a match when there is
+            // at least one delimiter between opener and closer (an
+            // immediately following closer is the inner emphasis and
+            // must be allowed, e.g. one '_' of '__')
+            if (ci - oi <= 1 || openerMatches(oi, ci)) { found = oi; break; }
+          }
         }
         oi--;
       }
@@ -1970,7 +2024,7 @@ function inlineHtml(text, defs) {
         canOpen = left;
         canClose = right;
       }
-      const d = pushNode({ k: 'delim', ch, n: runLen, canOpen, canClose, active: true, openTags: [], closeTags: [] });
+      const d = pushNode({ k: 'delim', ch, n: runLen, origN: runLen, canOpen, canClose, active: true, openTags: [], closeTags: [] });
       delims.push(d);
       i = j;
       continue;
@@ -2075,6 +2129,13 @@ function inlineHtml(text, defs) {
       }
       const he = matchInlineHtml(text, i);
       if (he > 0) {
+        // marked's inLink flag: <a + space opens, </a> closes
+        const c1 = text.charCodeAt(i + 1);
+        if (c1 === 97 || c1 === 65) { if (text.charCodeAt(i + 2) === 32) inLink = true; }
+        else if (c1 === 47) {
+          const c2 = text.charCodeAt(i + 2);
+          if ((c2 === 97 || c2 === 65) && text.charCodeAt(i + 3) === 62) inLink = false;
+        }
         pushNode({ k: 'html', s: text.slice(i, he) });
         i = he;
         continue;
@@ -2123,8 +2184,9 @@ function inlineHtml(text, defs) {
       i++;
       continue;
     }
-    // extended autolink (www. / scheme / email)
-    if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
+    // extended autolink (www. / scheme / email), suppressed while
+    // an inline <a ...> is open (marked's document-wide inLink flag)
+    if (!inLink && ((code >= 65 && code <= 90) || (code >= 97 && code <= 122))) {
       const ea = tryExtendedAutolink(text, i, hasOpenUnd());
       if (ea) {
         pushNode({ k: 'link', href: ea.href, title: null, img: false, auto: 'ext', children: [{ k: 'text', s: ea.text, seq: seq++ }] });
@@ -2139,7 +2201,7 @@ function inlineHtml(text, defs) {
       if (c === 92 || c === 96 || c === 42 || c === 95 || c === 126 || c === 91 || c === 93 || c === 60 || c === 38 || c === 10) break;
       if (c === 33 && text[j + 1] === '[') break;
       // stop before a GFM extended autolink (www. / scheme:// / email)
-      if (j > i && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
+      if (!inLink && j > i && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
         const pc = text.charCodeAt(j - 1);
         if (pc === 32 || pc === 9 || pc === 10 || pc === 40 || pc === 60 || pc === 42 || pc === 95 || pc === 126) {
           if (tryExtendedAutolink(text, j, hasOpenUnd())) break;
@@ -2262,6 +2324,7 @@ function renderBlock(nd, defs, tight) {
 }
 
 export function parse(md) {
+  inLink = false;
   const src = String(md).replace(/\r\n?/g, '\n');
   const srcEndsNL = src.endsWith('\n');
   const lines = src.split('\n');
