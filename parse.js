@@ -811,12 +811,18 @@ function parseBlocks(lines, srcEndsNL) {
       // Inside 2+ nested blockquotes the tab stop is column 2 (marked
       // treats the nested '>' markers as contributing two columns).
       const stripped = fenceIndent > 0 ? stripIndentFrom(c, fenceIndent, r.col) : c;
+      // a content line that starts with a tab at column 0 inside an
+      // indented fence: marked's container layer expands the tab
+      // (col 0 -> 4 spaces) and the container indent plus the fence
+      // indent together cover the full tab width, so the tab vanishes
+      // entirely (a partial-tab strip would wrongly leave spaces)
+      const stripped2 = (r.col === 0 && fenceIndent > 0 && c.charCodeAt(0) === 9) ? c.slice(1) : stripped;
       // a tab in fenced content expands from the layer-local column:
       // the column within the innermost blockquote layer's re-lexed
       // text (r.col minus the column that layer's line started at),
       // not the absolute document column; no blockquote -> as before
       let tabCol = r.bqOrigin != null ? r.col - r.bqOrigin : r.col;
-      content.push(r.col > 0 ? expandLeadingTabs(stripped, tabCol + fenceIndent) : stripped);
+      content.push(r.col > 0 ? expandLeadingTabs(stripped2, tabCol + fenceIndent) : stripped2);
       k++;
     }
     const nd = node('code');
