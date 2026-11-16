@@ -1884,6 +1884,33 @@ function isValidLabel(s, start, end) {
 // Is there a backtick run in s[start..end) with no later backtick run
 // to close it (and not a trailing run reaching end)? Mirrors the
 // backtick half of isValidLabel; bracket depth is ignored here.
+// Bracket balance of a label span only (backtick runs treated as
+// opaque): depth never negative, ends at 0, max depth 2. A stale
+// opener whose label spans unrelated text (an unmatched ']' inside)
+// is not a real link label, so it must not suppress emphasis.
+function labelBracketsBalanced(s, start, end) {
+  let depth = 0;
+  let i = start;
+  while (i < end) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < end) { i += 2; continue; }
+    if (ch === '`') {
+      let j = i;
+      while (j < end && s[j] === '`') j++;
+      let k = j;
+      while (k < end && s[k] !== '`') k++;
+      if (k >= end) { i = j; continue; }
+      let m = k;
+      while (m < end && s[m] === '`') m++;
+      i = m;
+      continue;
+    }
+    if (ch === '[') { depth++; if (depth > 2) return false; }
+    else if (ch === ']') { depth--; if (depth < 0) return false; }
+    i++;
+  }
+  return depth === 0;
+}
 function labelBacktickInvalid(s, start, end) {
   let i = start;
   while (i < end) {
@@ -2129,7 +2156,7 @@ function inlineHtml(text, defs) {
           // consumes the label and its delimiters never form emphasis.
           // Only the nearest opener counts (an outer opener's label
           // spans nested links whose emphasis must be left alone).
-          if (oi === openers.length - 1 && text[i + 1] === '(' && labelBacktickInvalid(text, ls, i)) {
+          if (oi === openers.length - 1 && text[i + 1] === '(' && labelBracketsBalanced(text, ls, i) && labelBacktickInvalid(text, ls, i)) {
             for (const d of delims) if (d.seq > o.seq && d.active) { d.active = false; d.canOpen = false; d.canClose = false; }
           }
           continue;
