@@ -756,8 +756,12 @@ function parseBlocks(lines, srcEndsNL) {
     if (fenceCh === 96 && info.indexOf('`') >= 0) return false;
     const lang = info.split(/[ \t]/)[0] || '';
     // content lines until a closing fence (s is the first line's content);
-    // each content line loses up to the opening fence's indentation
-    const fenceIndent = indentOfFrom(s, col);
+    // each content line loses up to the opening fence's indentation --
+    // except a tilde fence inside a container (blockquote or list item):
+    // marked keeps the content's indent after the container markers
+    // (it strips the container indent but not the fence indent)
+    let fenceIndent = indentOfFrom(s, col);
+    if (fenceCh === 126 && stack.some(nd => nd.t === 'bq' || nd.t === 'item')) fenceIndent = 0;
     const content = [];
     let k = i + 1;
     while (k < n) {
@@ -771,8 +775,11 @@ function parseBlocks(lines, srcEndsNL) {
         // a line that does not match the enclosing container is code
         // content only once the block already has content (a 0-indent
         // first line after the fence is outside the list item, so the
-        // block is empty); a line missing a '>' marker ends the block
-        if (content.length === 0) break;
+        // block is empty) -- except inside a blockquote, where the
+        // '>' marker test below decides (a blank '>' line is content,
+        // a line missing '>' ends the block)
+        const inBq = stack.some(nd => nd.t === 'bq');
+        if (content.length === 0 && !inBq) break;
         r = matchBQsOnly(lines[k], 0);
         if (r === null) break;
       }
@@ -1531,8 +1538,22 @@ function isUrlChar(ch) {
 // Try an extended (GFM) autolink starting at i in s. Returns
 // {end, href, text} or null. allowTrailUnd: an underscore emphasis
 // delimiter is open, so a trailing '_' after an email is its closer.
-function tryExtendedAutolink(s, i, allowTrailUnd) {
+// isLabelCloser: optional (pos) => boolean, true when a ']' at pos
+// would close a link label that forms a valid link (the autolink must
+// stop before it; otherwise '[' and ']' belong to the URL itself).
+function tryExtendedAutolink(s, i, allowTrailUnd, isLabelCloser) {
   const n = s.length;
+  // scan a URL's tail: ordinary URL chars, plus '[' and ']' unless the
+  // ']' would close a valid link label
+  function scanUrl(end) {
+    while (end < n) {
+      const ch = s[end];
+      if (isUrlChar(ch)) { end++; continue; }
+      if ((ch === ']' || ch === '[') && !(isLabelCloser && isLabelCloser(end))) { end++; continue; }
+      break;
+    }
+    return end;
+  }
   if (i > 0) {
     const pc = s[i - 1];
     if (!(pc === ' ' || pc === '\t' || pc === '\n' || pc === '*' || pc === '_' || pc === '~' || pc === '(' || pc === '<')) return null;
@@ -1541,11 +1562,10 @@ function tryExtendedAutolink(s, i, allowTrailUnd) {
   if (s.startsWith('www.', i)) {
     const dom = matchDomain(s, i + 4);
     if (dom < 0) return null;
-    let end = dom;
-    while (end < n && isUrlChar(s[end])) end++;
+    let end = scanUrl(dom);
     const len = backpedalLen(s.slice(i, end));
     if (len <= 4) return null;
-    end = balanceParens(s, i, i + len);
+    end = i + len;
     const url = s.slice(i, end);
     return { end, href: 'http://' + url, text: url };
   }
@@ -1566,7 +1586,7 @@ function tryExtendedAutolink(s, i, allowTrailUnd) {
       }
       const len = backpedalLen(s.slice(i, end));
       if (len <= sc - i) return null;
-      end = balanceParens(s, i, i + len);
+      end = i + len;
       const url = s.slice(i, end);
       return { end, href: url, text: url };
     }
@@ -1574,11 +1594,10 @@ function tryExtendedAutolink(s, i, allowTrailUnd) {
     if (s[sc] !== '/' || s[sc + 1] !== '/') return null;
     const dom = matchDomain(s, sc + 2);
     if (dom < 0) return null;
-    let end = dom;
-    while (end < n && isUrlChar(s[end])) end++;
+    let end = scanUrl(dom);
     const len = backpedalLen(s.slice(i, end));
     if (len <= sc - i) return null;
-    end = balanceParens(s, i, i + len);
+    end = i + len;
     const url = s.slice(i, end);
     return { end, href: url, text: url };
   }
@@ -1881,6 +1900,30 @@ function inlineHtml(text, defs) {
   // an email is then its closer, not part of the address)
   function hasOpenUnd() {
     for (const d of delims) if (d.ch === '_' && d.active && d.canOpen && d.n > 0) return true;
+    return false;
+  }
+
+  // Would the ']' at position j close a link label that forms a valid
+  // link? If so, an extended autolink must stop before it; otherwise
+  // the ']' (and '[') belong to the autolink URL itself.
+  function isLabelCloser(j) {
+    if (openers.length === 0) return false;
+    const after = j + 1;
+    if (text[after] === '(') return parseParenLink(text, after) !== null;
+    if (text[after] === '[') {
+      const lab = parseLabelAt(text, after);
+      if (lab) {
+        // collapsed reference [label][]: the label is the opener text,
+        // checked by the shortcut loop below
+        if (lab.label !== '') return defs.has(normalizeLabel(lab.label));
+      }
+      // malformed label: fall through to the shortcut check below
+    }
+    for (const o of openers) {
+      const ls = o.startPos + (o.img ? 2 : 1);
+      if (ls > j) continue;
+      if (isValidLabel(text, ls, j) && defs.has(normalizeLabel(text.slice(ls, j)))) return true;
+    }
     return false;
   }
 
@@ -2187,7 +2230,7 @@ function inlineHtml(text, defs) {
     // extended autolink (www. / scheme / email), suppressed while
     // an inline <a ...> is open (marked's document-wide inLink flag)
     if (!inLink && ((code >= 65 && code <= 90) || (code >= 97 && code <= 122))) {
-      const ea = tryExtendedAutolink(text, i, hasOpenUnd());
+      const ea = tryExtendedAutolink(text, i, hasOpenUnd(), isLabelCloser);
       if (ea) {
         pushNode({ k: 'link', href: ea.href, title: null, img: false, auto: 'ext', children: [{ k: 'text', s: ea.text, seq: seq++ }] });
         i = ea.end;
@@ -2204,7 +2247,7 @@ function inlineHtml(text, defs) {
       if (!inLink && j > i && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
         const pc = text.charCodeAt(j - 1);
         if (pc === 32 || pc === 9 || pc === 10 || pc === 40 || pc === 60 || pc === 42 || pc === 95 || pc === 126) {
-          if (tryExtendedAutolink(text, j, hasOpenUnd())) break;
+          if (tryExtendedAutolink(text, j, hasOpenUnd(), isLabelCloser)) break;
         }
       }
       j++;
