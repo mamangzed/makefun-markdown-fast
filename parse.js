@@ -1876,6 +1876,16 @@ function tryCodeSpan(s, i, isLabelCloser) {
 // code span does not count; a backtick run is treated as opaque text
 // up to its matching close run when one exists.
 function isValidLabel(s, start, end) {
+  // fast path: a label with no backtick, no nested '[' and no escape
+  // is valid iff it contains no ']' either -- native indexOf beats a
+  // char-by-char scan for the common simple-label case
+  const bt = s.indexOf('`', start);
+  const br = s.indexOf('[', start);
+  const bs = s.indexOf('\\', start);
+  if ((bt < 0 || bt >= end) && (br < 0 || br >= end) && (bs < 0 || bs >= end)) {
+    const rb = s.indexOf(']', start);
+    return rb < 0 || rb >= end;
+  }
   let depth = 0;
   let i = start;
   while (i < end) {
@@ -2459,12 +2469,20 @@ function inlineHtml(text, defs) {
   }
   function applyPhantomMask() {
     const N = text.length;
+    // a phantom span needs a backtick inside a link label and a
+    // later backtick run: without either, there is nothing to mask
+    if (text.indexOf('`') < 0 || text.indexOf('[') < 0) return;
+    // collect all phantom spans first, then deactivate delimiters
+    // inside any of them in a single pass over delims
+    const spans = [];
     let i = 0;
     while (i < N) {
       if (text[i] !== '[') { i++; continue; }
       let j = i + 1, close = -1;
       while (j < N) {
-        if (text[j] === ']' && isValidLabel(text, i + 1, j)) { close = j; break; }
+        // a label without a backtick cannot hold a stray, so only
+        // pay for isValidLabel when one is present in the segment
+        if (text[j] === ']' && text.indexOf('`', i + 1) < j && isValidLabel(text, i + 1, j)) { close = j; break; }
         j++;
       }
       if (close < 0) { i++; continue; }
@@ -2504,20 +2522,22 @@ function inlineHtml(text, defs) {
         }
       }
       // every unconsumed opener, and every run inside it, is a
-      // stray: mask from each to the next same-length run after
-      // the label
+      // stray: record its phantom span (to the next same-length
+      // run after the label) for the single deactivation pass
       for (const op of pending) {
         const strays = [{ start: op.start, len: op.len }, ...op.cands];
         for (const st of strays) {
           const end = findBtCloser(close + 1, st.len, N);
-          if (end >= 0) {
-            for (const d of delims) {
-              if (d.pos >= st.start && d.pos < end) { d.active = false; d.canOpen = false; d.canClose = false; }
-            }
-          }
+          if (end >= 0) spans.push([st.start, end]);
         }
       }
       i = close + 1;
+    }
+    if (spans.length === 0) return;
+    for (const d of delims) {
+      for (let s = 0; s < spans.length; s++) {
+        if (d.pos >= spans[s][0] && d.pos < spans[s][1]) { d.active = false; d.canOpen = false; d.canClose = false; break; }
+      }
     }
   }
 
