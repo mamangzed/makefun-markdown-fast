@@ -1823,13 +1823,17 @@ function tryAngleAutolink(s, i) {
 }
 
 // Find a code span starting at s[i] === '`'. Returns {end, content} or null.
-function tryCodeSpan(s, i) {
+function tryCodeSpan(s, i, isLabelCloser) {
   const n = s.length;
   let j = i;
   while (j < n && s[j] === '`') j++;
   const m = j - i;
   let k = j;
   while (k < n) {
+    // a code span must not swallow the ']' that closes a valid link
+    // label (marked matches the link first, so the backticks inside
+    // the label stay literal when the closer lies outside it)
+    if (s[k] === ']' && isLabelCloser && isLabelCloser(k)) return null;
     if (s[k] === '`') {
       let l = k;
       while (l < n && s[l] === '`') l++;
@@ -1985,6 +1989,45 @@ function inlineHtml(text, defs) {
     return false;
   }
 
+  // A code span opened inside a link label must not swallow the ']'
+  // that closes the label -- but only when the label is actually
+  // valid (balanced brackets, paired backticks) and will form a link.
+  // An invalid label (e.g. an unclosed backtick) never forms a link,
+  // so a code span may cross its ']' freely (cm-525, cm-537). The
+  // backticks must be fully paired inside the label: a lone trailing
+  // run (valid for the label regex) does not count, because marked
+  // tokenizes the code span first and the link never forms.
+  function labelBackticksPaired(s, start, end) {
+    let i = start;
+    while (i < end) {
+      if (s[i] === '\\' && i + 1 < end) { i += 2; continue; }
+      if (s[i] === '`') {
+        let j = i;
+        while (j < end && s[j] === '`') j++;
+        let k = j;
+        let closed = false;
+        while (k < end) { if (s[k] === '`') { closed = true; break; } k++; }
+        if (!closed) return false;
+        let m = k;
+        while (m < end && s[m] === '`') m++;
+        i = m;
+        continue;
+      }
+      i++;
+    }
+    return true;
+  }
+  function isLabelCloserForCode(j) {
+    if (openers.length === 0) return false;
+    let labelOk = false;
+    for (const o of openers) {
+      const ls = o.startPos + (o.img ? 2 : 1);
+      if (ls <= j && isValidLabel(text, ls, j) && labelBackticksPaired(text, ls, j)) { labelOk = true; break; }
+    }
+    if (!labelOk) return false;
+    return isLabelCloser(j);
+  }
+
   function addText(s) {
     if (!s) return;
     const last = nodes[nodes.length - 1];
@@ -2088,7 +2131,10 @@ function inlineHtml(text, defs) {
       continue;
     }
     if (code === 96) { // backtick
-      const cs = tryCodeSpan(text, i);
+      // a code span opened inside a link label must not swallow the
+      // label's closing ']' (marked matches the link first); outside
+      // a label, code spans may contain ']' freely
+      const cs = tryCodeSpan(text, i, openers.length > 0 ? isLabelCloserForCode : null);
       if (cs) {
         pushNode({ k: 'code', s: cs.content });
         i = cs.end;
