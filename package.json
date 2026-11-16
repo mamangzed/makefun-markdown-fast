@@ -1,1 +1,1 @@
-{"description":"Fast dependency-free CommonMark 0.31.2 + GFM 0.29 renderer returning exactly marked 18.1.3 HTML","name":"makefun-markdown-fast","private":true,"type":"module","version":"1.0.0"}
+{"description":"Fast dependency-free CommonMark 0.31.2 + GFM 0.29 renderer returning exactly marked 18.1.3 HTML","name":"makefun-markdown-fast","private":true,"scripts":{"bench:cold":"node bench/cold.mjs"},"type":"module","version":"1.0.0"}

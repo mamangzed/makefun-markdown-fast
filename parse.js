@@ -34,6 +34,11 @@ const RE_ESC_NOENC = /[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|[a-zA-Z][a-zA-Z
 const RE_ESC_ENC = /[&<>"']/g;
 function esc(s, encode) {
   if (!s) return s;
+  // Fast path: most text has no escapable character at all, so skip the
+  // regex entirely (indexOf is far cheaper than setting up a global
+  // exec loop). Behaviour-identical: the regexes below only match
+  // one of these five characters.
+  if (s.indexOf('&') < 0 && s.indexOf('<') < 0 && s.indexOf('>') < 0 && s.indexOf('"') < 0 && s.indexOf("'") < 0) return s;
   let out = '';
   let last = 0;
   const re = encode ? RE_ESC_ENC : RE_ESC_NOENC;
@@ -1426,8 +1431,9 @@ function linkParents(nd, parent) {
 function isAlnumCh(ch) {
   return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
 }
-const EMAIL_LOCAL = new Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-".split(''));
-function isEmailLocalCh(ch) { return EMAIL_LOCAL.has(ch); }
+const EMAIL_LOCAL_T = new Uint8Array(128);
+for (const c of "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-") EMAIL_LOCAL_T[c.charCodeAt(0)] = 1;
+function isEmailLocalCh(ch) { const c = ch.charCodeAt(0); return c < 128 && EMAIL_LOCAL_T[c] === 1; }
 
 // Code point ending just before index i in s (-1 at the start).
 function codePointBefore(s, i) {
@@ -1439,9 +1445,11 @@ function codePointBefore(s, i) {
   }
   return c;
 }
+const PUNCT_T = new Uint8Array(128);
+for (let k = 0; k < PUNCT.length; k++) PUNCT_T[PUNCT.charCodeAt(k)] = 1;
 function isPunctCP(cp) {
   if (cp < 0) return false;
-  if (cp < 128) return PUNCT.indexOf(String.fromCharCode(cp)) >= 0;
+  if (cp < 128) return PUNCT_T[cp] === 1;
   return RE_UPUNCT.test(String.fromCodePoint(cp));
 }
 function isWsCP(cp) {
@@ -1988,11 +1996,23 @@ function inlineHtml(text, defs) {
   const delims = [];
   const openers = [];
   let seq = 0;
+  // Shared empty tag list: delimiter open/close tag arrays are
+  // allocated lazily (most delimiters never match), so renderers
+  // iterate this instead of a fresh [] per delimiter.
+  const NO_TAGS = [];
 
   // is an underscore emphasis delimiter open? (a trailing '_' after
   // an email is then its closer, not part of the address)
+  // Cached: the answer only changes when delimiters are pushed or
+  // deactivated, so a scan of the whole delim list per autolink probe
+  // (one per word boundary) is pure waste. Invalidated where delims
+  // change: the '*'/'_'/'~' push below, processEmphasis entry, and
+  // the end of the ']' branch.
+  let openUndCache = -1; // -1 dirty, 0 no, 1 yes
   function hasOpenUnd() {
-    for (const d of delims) if (d.ch === '_' && d.active && d.canOpen && d.n > 0) return true;
+    if (openUndCache >= 0) return openUndCache === 1;
+    for (const d of delims) if (d.ch === '_' && d.active && d.canOpen && d.n > 0) { openUndCache = 1; return true; }
+    openUndCache = 0;
     return false;
   }
 
@@ -2063,7 +2083,7 @@ function inlineHtml(text, defs) {
     if (!s) return;
     const last = nodes[nodes.length - 1];
     if (last && last.k === 'text' && !last.nomerge) last.s += s;
-    else nodes.push({ k: 'text', s, seq: seq++ });
+    else nodes.push({ k: 'text', s, seq: seq++, nomerge: false });
   }
   function pushNode(nd) {
     nd.seq = seq++;
@@ -2074,6 +2094,7 @@ function inlineHtml(text, defs) {
   // Resolve emphasis among delimiters with seq > bottomSeq, recording
   // open/close tags on the delimiter nodes.
   function processEmphasis(bottomSeq) {
+    openUndCache = -1; // emphasis resolution mutates delimiters
     // marked scans forward from an opener, counting delimiter lengths:
     // opener-like runs add, closer-like runs subtract, both-ways runs
     // subtract unless odd-match-blocked against the opener (opener
@@ -2145,7 +2166,9 @@ function inlineHtml(text, defs) {
       const opener = delims[found];
       const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
       const tag = closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
+      opener.openTags ??= [];
       opener.openTags.push(tag);
+      closer.closeTags ??= [];
       closer.closeTags.push(tag);
       opener.n -= use;
       closer.n -= use;
@@ -2160,7 +2183,7 @@ function inlineHtml(text, defs) {
       if (closer.n > 0 && use === 2) {
         for (let k = ci - 1; k > found; k--) {
           const d = delims[k];
-          if (d.closeTags.length > 0 && d.n === 0 && d.canOpen && d.canClose) { closer.leftoverInside = true; break; }
+          if (d.closeTags && d.closeTags.length > 0 && d.n === 0 && d.canOpen && d.canClose) { closer.leftoverInside = true; break; }
           if (d.n > 0 && d.active) break;
         }
       }
@@ -2239,8 +2262,9 @@ function inlineHtml(text, defs) {
         canOpen = left;
         canClose = right;
       }
-      const d = pushNode({ k: 'delim', ch, n: runLen, origN: runLen, canOpen, canClose, active: true, openTags: [], closeTags: [], pos: i });
+      const d = pushNode({ k: 'delim', ch, n: runLen, origN: runLen, canOpen, canClose, active: true, openTags: null, closeTags: null, leftoverInside: false, pos: i });
       delims.push(d);
+      openUndCache = -1; // a new delimiter may change hasOpenUnd()
       i = j;
       continue;
     }
@@ -2303,11 +2327,12 @@ function inlineHtml(text, defs) {
         }
         if (lk) { opener = o; openerIdxInStack = oi; link = lk; linkEnd = le; break; }
       }
-      if (!link) { addText(']'); i++; continue; }
+      if (!link) { openUndCache = -1; addText(']'); i++; continue; }
       // form the link: resolve emphasis inside its text, then remove the
       // remaining delimiters inside it so they cannot match outside ones
       processEmphasis(opener.seq);
       for (const d of delims) if (d.seq > opener.seq) d.active = false;
+      openUndCache = -1; // the deactivation above may change hasOpenUnd()
       const openerIdx = nodes.indexOf(opener);
       let children = nodes.slice(openerIdx + 1);
       // an extended autolink inside a link label stays plain text
@@ -2329,7 +2354,7 @@ function inlineHtml(text, defs) {
         children = merged;
       }
       nodes.length = openerIdx;
-      pushNode({ k: 'link', href: link.dest, title: link.title, img: opener.img, children });
+      pushNode({ k: 'link', href: link.dest, title: link.title, img: opener.img, auto: null, children });
       if (opener.img) {
         // an image leaves outer openers alone (a link may still wrap it)
         openers.length = openerIdxInStack;
@@ -2567,9 +2592,10 @@ function inlineHtml(text, defs) {
         // but a leftover flagged 'leftoverInside' renders before
         // them (inside the emphasis tag)
         if (nd.leftoverInside && nd.n > 0) out += nd.ch.repeat(nd.n);
-        for (const t of nd.closeTags) out += '</' + t + '>';
+        for (const t of nd.closeTags || NO_TAGS) out += '</' + t + '>';
         if (!nd.leftoverInside && nd.n > 0) out += nd.ch.repeat(nd.n);
-        for (let k = nd.openTags.length - 1; k >= 0; k--) out += '<' + nd.openTags[k] + '>';
+        const ot = nd.openTags || NO_TAGS;
+        for (let k = ot.length - 1; k >= 0; k--) out += '<' + ot[k] + '>';
       }
       else if (nd.k === 'open') out += nd.img ? '![' : '[';
       else if (nd.k === 'code') out += '<code>' + esc(nd.s, true) + '</code>';
@@ -2657,7 +2683,10 @@ function renderBlock(nd, defs, tight) {
 
 export function parse(md) {
   inLink = false;
-  const src = String(md).replace(/\r\n?/g, '\n');
+  // Fast path: the CRLF normalisation pass copies the whole input, so
+  // only pay for it when a carriage return is actually present.
+  const raw = String(md);
+  const src = raw.includes('\r') ? raw.replace(/\r\n?/g, '\n') : raw;
   const srcEndsNL = src.endsWith('\n');
   const lines = src.split('\n');
   if (srcEndsNL) lines.pop();
